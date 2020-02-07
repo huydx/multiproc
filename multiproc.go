@@ -2,8 +2,11 @@ package multiproc
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
+	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"strings"
@@ -13,39 +16,73 @@ import (
 	"github.com/hashicorp/go-multierror"
 )
 
+const (
+	defaultHealthTimeout = 10 * time.Second
+	defaultHttpPort      = 9999
+)
+
 type Config struct {
-	Procs []*Proc `yaml:"procs"`
+	HttpPort int     `yaml:"http_port"`
+	Procs    []*Proc `yaml:"procs"`
 }
 
 type Proc struct {
-	Path     string          `yaml:"path"`
-	Args     []string        `yaml:"-"`
-	state    os.ProcessState `yaml:"-"`
-	cancelCh chan struct{}   `yaml:"-"`
-	proc     *os.Process     `yaml:"-"`
+	Path          string        `yaml:"path"`
+	HealthPath    string        `yaml:"health"`
+	HealthTimeout time.Duration `yaml:"health_time_out"`
+
+	Args     []string         `yaml:"-"`
+	cancelCh chan struct{}    `yaml:"-"`
+	proc     *os.Process      `yaml:"-"`
+	state    *os.ProcessState `yaml:"-"`
 }
 
 type MultiProc struct {
-	procs  []*Proc
-	errCh  chan error `yaml:"-"`
-	ioLock sync.Mutex
-	done   chan interface{}
+	procs    []*Proc
+	errCh    chan error `yaml:"-"`
+	ioLock   sync.Mutex
+	done     chan interface{}
+	httpPort int
 }
 
 func New(cfg *Config) *MultiProc {
+	var httpPort int
+	if cfg.HttpPort <= 0 {
+		httpPort = defaultHttpPort
+	} else {
+		httpPort = cfg.HttpPort
+	}
+
 	procs := cfg.Procs
-	for _, p := range procs {
+	for i, p := range procs {
+		if p.HealthTimeout <= 0 {
+			procs[i].HealthTimeout = defaultHealthTimeout
+		}
 		p.cancelCh = make(chan struct{}, 1)
 	}
 
 	return &MultiProc{
-		procs: procs,
-		errCh: make(chan error, 1),
-		done:  make(chan interface{}, 1),
+		procs:    procs,
+		httpPort: httpPort,
+		errCh:    make(chan error, 1),
+		done:     make(chan interface{}, 1),
 	}
 }
 
 func (m *MultiProc) Start() error {
+	go func() {
+		http.HandleFunc("/health", func(writer http.ResponseWriter, request *http.Request) {
+			if m.Health() {
+				writer.WriteHeader(200)
+				_, _ = writer.Write([]byte("ok"))
+			} else {
+				writer.WriteHeader(500)
+				_, _ = writer.Write([]byte("not ok!"))
+			}
+		})
+		fmt.Printf("start listening at :%d/health\n", m.httpPort)
+		log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", m.httpPort), nil))
+	}()
 	for i, p := range m.procs {
 		go func(j int, pp *Proc) {
 			fmt.Printf("try runinng p %v\n", pp)
@@ -70,6 +107,7 @@ func (m *MultiProc) Start() error {
 				panic(err)
 			}
 			m.procs[j].proc = cmd.Process
+			m.procs[j].state = cmd.ProcessState
 			go func() {
 				scanner := bufio.NewScanner(stdoutPipe)
 				for scanner.Scan() {
@@ -113,6 +151,25 @@ func (m *MultiProc) Start() error {
 			time.Sleep(time.Second)
 		}
 	}
+}
+
+func (m *MultiProc) Health() bool {
+	for _, p := range m.procs {
+		r, e := http.NewRequest("GET", p.HealthPath, nil)
+		if e != nil {
+			_, _ = os.Stderr.WriteString(fmt.Sprintf("process %v died", p.Path))
+			return false
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), p.HealthTimeout)
+		defer cancel()
+		r.WithContext(ctx)
+		res, err := http.DefaultClient.Do(r)
+		if err != nil || res.StatusCode >= 300 {
+			_, _ = os.Stderr.WriteString(fmt.Sprintf("process %v died", p.Path))
+			return false
+		}
+	}
+	return true
 }
 
 func (m *MultiProc) Stop() error {

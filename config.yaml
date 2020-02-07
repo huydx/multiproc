@@ -1,3 +1,5 @@
 procs:
   - path: /tmp/main foo bar
+    health: http://127.0.0.1:9998/health
   - path: /tmp/main2 fooo barrr
+    health: http://127.0.0.1:9997/health
