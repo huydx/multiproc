@@ -80,6 +80,10 @@ func (m *MultiProc) Start() error {
 				_, _ = writer.Write([]byte("not ok!"))
 			}
 		})
+		http.HandleFunc("/state", func(writer http.ResponseWriter, request *http.Request) {
+			writer.WriteHeader(200)
+			_, _ = writer.Write([]byte(m.String()))
+		})
 		fmt.Printf("start listening at :%d/health\n", m.httpPort)
 		log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", m.httpPort), nil))
 	}()
@@ -126,6 +130,10 @@ func (m *MultiProc) Start() error {
 					m.ioLock.Unlock()
 				}
 			}()
+			if err := cmd.Wait(); err != nil {
+				_, _ = os.Stderr.Write([]byte(err.Error()))
+			}
+			m.procs[i].state = cmd.ProcessState
 		}(i, p)
 	}
 
@@ -170,6 +178,17 @@ func (m *MultiProc) Health() bool {
 		}
 	}
 	return true
+}
+
+func (m *MultiProc) String() string {
+	s := strings.Builder{}
+	for _, p := range m.procs {
+		s.WriteString(p.Path)
+		s.WriteString(" state:")
+		s.WriteString(p.state.String())
+		s.WriteString("\n")
+	}
+	return s.String()
 }
 
 func (m *MultiProc) Stop() error {
