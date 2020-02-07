@@ -1,6 +1,7 @@
 package multiproc
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -21,9 +22,9 @@ type Proc struct {
 
 type MultiProc struct {
 	procs  []*Proc
-	stderr io.ReadWriteCloser `yaml:"-"`
-	stdout io.ReadWriteCloser `yaml:"-"`
-	errCh  chan error         `yaml:"-"`
+	stderr io.ReadWriter `yaml:"-"`
+	stdout io.ReadWriter `yaml:"-"`
+	errCh  chan error    `yaml:"-"`
 }
 
 func New(cfg *Config) *MultiProc {
@@ -33,41 +34,41 @@ func New(cfg *Config) *MultiProc {
 	}
 
 	return &MultiProc{
-		procs: procs,
-		errCh: make(chan error, 1),
+		procs:  procs,
+		errCh:  make(chan error, 1),
+		stdout: bytes.NewBuffer(make([]byte, 1000)),
+		stderr: bytes.NewBuffer(make([]byte, 1000)),
 	}
 }
 
 func (m *MultiProc) Start() error {
 	for _, p := range m.procs {
 		go func(pp *Proc) {
-			fmt.Printf("try runinng p %v¥n", pp)
+			fmt.Printf("try runinng p %v\n", pp)
 			cmd := exec.Command(pp.Path, pp.Args...)
-			err := cmd.Start()
-			if err != nil {
-			}
-			errPipe, err := cmd.StderrPipe()
-			if err != nil {
-				m.errCh <- err
-				return
-			}
+			//errPipe, err := cmd.StderrPipe()
+			//if err != nil {
+			//	m.errCh <- err
+			//	return
+			//}
 			stdoutPipe, err := cmd.StdoutPipe()
 			if err != nil {
 				m.errCh <- err
 				return
 			}
-
+			err = cmd.Start()
+			if err != nil {
+				panic(err)
+			}
 			go func() {
-				for {
-					if _, err := io.Copy(m.stdout, stdoutPipe); err != nil {
-						m.errCh <- err
-						return
-					}
-					if _, err := io.Copy(m.stderr, errPipe); err != nil {
-						m.errCh <- err
-						return
-					}
+				if _, err := io.Copy(m.stdout, stdoutPipe); err != nil {
+					m.errCh <- err
+					return
 				}
+				//if _, err := io.Copy(m.stderr, errPipe); err != nil {
+				//	m.errCh <- err
+				//	return
+				//}
 			}()
 
 			go func() {
@@ -79,6 +80,15 @@ func (m *MultiProc) Start() error {
 					}
 					if n > 0 {
 						fmt.Println(buff)
+					}
+				}
+			}()
+
+			go func() {
+				for {
+					select {
+					case err := <-m.errCh:
+						fmt.Println(err)
 					}
 				}
 			}()
