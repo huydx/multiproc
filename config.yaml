@@ -1,2 +1,3 @@
 procs:
-  - path: /tmp/main
+  - path: /tmp/main foo bar
+  - path: /tmp/main2 fooo barrr

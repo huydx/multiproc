@@ -1,12 +1,16 @@
 package multiproc
 
 import (
-	"bytes"
+	"bufio"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"strings"
+	"sync"
 	"time"
+
+	"github.com/hashicorp/go-multierror"
 )
 
 type Config struct {
@@ -18,13 +22,14 @@ type Proc struct {
 	Args     []string        `yaml:"-"`
 	state    os.ProcessState `yaml:"-"`
 	cancelCh chan struct{}   `yaml:"-"`
+	proc     *os.Process     `yaml:"-"`
 }
 
 type MultiProc struct {
 	procs  []*Proc
-	stderr io.ReadWriter `yaml:"-"`
-	stdout io.ReadWriter `yaml:"-"`
-	errCh  chan error    `yaml:"-"`
+	errCh  chan error `yaml:"-"`
+	ioLock sync.Mutex
+	done   chan interface{}
 }
 
 func New(cfg *Config) *MultiProc {
@@ -34,23 +39,27 @@ func New(cfg *Config) *MultiProc {
 	}
 
 	return &MultiProc{
-		procs:  procs,
-		errCh:  make(chan error, 1),
-		stdout: bytes.NewBuffer(make([]byte, 1000)),
-		stderr: bytes.NewBuffer(make([]byte, 1000)),
+		procs: procs,
+		errCh: make(chan error, 1),
+		done:  make(chan interface{}, 1),
 	}
 }
 
 func (m *MultiProc) Start() error {
-	for _, p := range m.procs {
-		go func(pp *Proc) {
+	for i, p := range m.procs {
+		go func(j int, pp *Proc) {
 			fmt.Printf("try runinng p %v\n", pp)
-			cmd := exec.Command(pp.Path, pp.Args...)
-			//errPipe, err := cmd.StderrPipe()
-			//if err != nil {
-			//	m.errCh <- err
-			//	return
-			//}
+			paths := strings.Split(pp.Path, " ")
+			if len(paths) == 0 {
+				m.errCh <- fmt.Errorf("empty paths")
+				return
+			}
+			cmd := exec.Command(paths[0], paths[1:]...)
+			stderrPipe, err := cmd.StderrPipe()
+			if err != nil {
+				m.errCh <- err
+				return
+			}
 			stdoutPipe, err := cmd.StdoutPipe()
 			if err != nil {
 				m.errCh <- err
@@ -60,46 +69,67 @@ func (m *MultiProc) Start() error {
 			if err != nil {
 				panic(err)
 			}
+			m.procs[j].proc = cmd.Process
 			go func() {
-				if _, err := io.Copy(m.stdout, stdoutPipe); err != nil {
-					m.errCh <- err
-					return
-				}
-				//if _, err := io.Copy(m.stderr, errPipe); err != nil {
-				//	m.errCh <- err
-				//	return
-				//}
-			}()
-
-			go func() {
-				for {
-					buff := make([]byte, 0, 1000)
-					n, err := m.stdout.Read(buff)
-					if err != nil {
-						m.errCh <- err
-					}
-					if n > 0 {
-						fmt.Println(buff)
-					}
+				scanner := bufio.NewScanner(stdoutPipe)
+				for scanner.Scan() {
+					m.ioLock.Lock()
+					_, _ = os.Stdout.Write(scanner.Bytes())
+					_, _ = os.Stdout.WriteString("\n")
+					m.ioLock.Unlock()
 				}
 			}()
-
 			go func() {
-				for {
-					select {
-					case err := <-m.errCh:
-						fmt.Println(err)
-					}
+				scanner := bufio.NewScanner(stderrPipe)
+				for scanner.Scan() {
+					m.ioLock.Lock()
+					_, _ = os.Stderr.Write(scanner.Bytes())
+					_, _ = os.Stderr.WriteString("\n")
+					m.ioLock.Unlock()
 				}
 			}()
-		}(p)
+		}(i, p)
 	}
 
+	go func() {
+		for {
+			select {
+			case err := <-m.errCh:
+				if err != io.EOF {
+					m.ioLock.Lock()
+					_, _ = os.Stderr.WriteString(err.Error())
+					_, _ = os.Stderr.WriteString("\n")
+					m.ioLock.Unlock()
+				}
+			}
+		}
+	}()
+
 	for {
-		time.Sleep(time.Second)
+		select {
+		case <-m.done:
+			return nil
+		default:
+			time.Sleep(time.Second)
+		}
 	}
 }
 
 func (m *MultiProc) Stop() error {
-	return nil
+	var e error
+	var ee *multierror.Error
+	for _, p := range m.procs {
+		if err := p.proc.Kill(); err != nil {
+			m.ioLock.Lock()
+			ee = multierror.Append(e, err)
+			_, _ = os.Stderr.WriteString(err.Error())
+			_, _ = os.Stderr.WriteString("\n")
+			m.ioLock.Unlock()
+		}
+	}
+	m.done <- struct{}{}
+	if ee == nil {
+		return nil
+	}
+	return ee.ErrorOrNil()
 }
