@@ -88,7 +88,7 @@ func (m *MultiProc) Start() error {
 		log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", m.httpPort), nil))
 	}()
 	for i, p := range m.procs {
-		go func(j int, pp *Proc) {
+		var startProc = func(j int, pp *Proc) {
 			fmt.Printf("try runinng p %v\n", pp)
 			paths := strings.Split(pp.Path, " ")
 			if len(paths) == 0 {
@@ -134,7 +134,8 @@ func (m *MultiProc) Start() error {
 				_, _ = os.Stderr.Write([]byte(err.Error()))
 			}
 			m.procs[i].state = cmd.ProcessState
-		}(i, p)
+		}
+		go startProc(i, p)
 	}
 
 	go func() {
