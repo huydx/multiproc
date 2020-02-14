@@ -2,13 +2,15 @@ package main
 
 import (
 	"fmt"
-	"github.com/huydx/multiproc"
-	"gopkg.in/yaml.v2"
 	"io/ioutil"
 	"log"
 	"os"
 	"os/signal"
 	"syscall"
+
+	"github.com/huydx/multiproc"
+
+	"gopkg.in/yaml.v2"
 )
 
 func main() {
@@ -25,7 +27,16 @@ func main() {
 		log.Fatal(err)
 	}
 	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGABRT, syscall.SIGTERM, syscall.SIGINT)
+	var terms = []os.Signal{
+		syscall.SIGABRT,
+		syscall.SIGTERM,
+		syscall.SIGINT,
+		syscall.SIGKILL,
+		syscall.SIGHUP,
+		syscall.SIGQUIT,
+		syscall.SIGSTOP,
+	}
+	signal.Notify(sigs, terms...)
 	mt := multiproc.New(&cfg)
 	go func() {
 		sig := <-sigs
